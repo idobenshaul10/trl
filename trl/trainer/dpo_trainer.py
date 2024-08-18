@@ -529,9 +529,12 @@ class DPOTrainer(Trainer):
             # tokenize the dataset, lower writer batch size to avoid OOM (frequent in vision models)
             train_dataset = train_dataset.map(self.tokenize_row, num_proc=self.dataset_num_proc, writer_batch_size=10)
             if eval_dataset is not None:
-                eval_dataset = eval_dataset.map(
-                    self.tokenize_row, num_proc=self.dataset_num_proc, writer_batch_size=10
-                )
+                if isinstance(eval_dataset, dict):
+                    eval_dataset = {k: v.map(self.tokenize_row, num_proc=self.dataset_num_proc, writer_batch_size=10) for k, v in eval_dataset.items()}
+                else:
+                    eval_dataset = eval_dataset.map(
+                        self.tokenize_row, num_proc=self.dataset_num_proc, writer_batch_size=10
+                    )
 
         super().__init__(
             model=model,
