@@ -170,6 +170,7 @@ class DPOTrainer(Trainer):
         reference_free: bool = False,
         force_use_ref_model: bool = False,
     ):
+        self.current_metric_key_prefix = None
         if model_init_kwargs is not None:
             warnings.warn(
                 "You passed `model_init_kwargs` to the DPOTrainer, the value you passed will override the one in the `DPOConfig`."
@@ -1414,7 +1415,15 @@ class DPOTrainer(Trainer):
             # RPO loss from V3 of the paper:
             losses = losses + policy_nll_loss * self.args.rpo_alpha
 
-        prefix = "eval_" if train_eval == "eval" else ""
+        if train_eval == "train":
+            prefix = ""
+        elif train_eval == "eval":
+            if self.current_metric_key_prefix:
+                prefix = self.current_metric_key_prefix + "_"
+            else:
+                prefix = "eval_"
+        else:
+            raise NotImplementedError()
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
         metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
         metrics[f"{prefix}rewards/accuracies"] = reward_accuracies.mean().cpu()
@@ -1534,8 +1543,12 @@ class DPOTrainer(Trainer):
 
         # logits for the chosen and rejected samples from model
         logits_dict = {
-            "eval_logits/chosen": metrics["eval_logits/chosen"],
-            "eval_logits/rejected": metrics["eval_logits/rejected"],
+            "eval_logits/chosen": [v
+                                   for k, v in metrics.items()
+                                   if k.startswith("eval_") and k.endswith("logits/chosen")][0],
+            "eval_logits/rejected": [v
+                                     for k, v in metrics.items()
+                                     if k.startswith("eval_") and k.endswith("logits/rejected")][0],
         }
         logits = tuple(v.unsqueeze(dim=0) for k, v in logits_dict.items() if k not in ignore_keys)
         logits = torch.stack(logits).mean(axis=1).to(self.accelerator.device)
@@ -1561,7 +1574,7 @@ class DPOTrainer(Trainer):
 
         Works both with or without labels.
         """
-
+        self.current_metric_key_prefix = metric_key_prefix
         # Sample and save to game log if requested (for one batch to save time)
         if self.generate_during_eval:
             # Generate random indices within the range of the total number of samples
@@ -1594,7 +1607,7 @@ class DPOTrainer(Trainer):
         initial_output = super().evaluation_loop(
             dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix
         )
-
+        self.current_metric_key_prefix = None
         return initial_output
 
     def log(self, logs: Dict[str, float]) -> None:
