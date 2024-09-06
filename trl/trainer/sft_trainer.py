@@ -39,7 +39,7 @@ from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalPrediction
 
 from ..extras.dataset_formatting import get_formatting_func_from_dataset
-from ..import_utils import is_peft_available
+from ..import_utils import is_liger_available, is_peft_available
 from .callbacks import RichProgressCallback
 from .sft_config import SFTConfig
 from .utils import (
@@ -53,6 +53,9 @@ from .utils import (
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
+
+if is_liger_available():
+    from liger_kernel.transformers import AutoLigerKernelForCausalLM
 
 
 class SFTTrainer(Trainer):
@@ -183,7 +186,10 @@ class SFTTrainer(Trainer):
                 "You passed a model_id to the SFTTrainer. This will automatically create an "
                 "`AutoModelForCausalLM` or a `PeftModel` (if you passed a `peft_config`) for you."
             )
-            model = AutoModelForCausalLM.from_pretrained(model, **model_init_kwargs)
+            if args.use_liger:
+                model = AutoLigerKernelForCausalLM.from_pretrained(model, **model_init_kwargs)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(model, **model_init_kwargs)
 
         if packing:
             warnings.warn(
@@ -462,15 +468,15 @@ class SFTTrainer(Trainer):
         self,
         commit_message: Optional[str] = "End of training",
         blocking: bool = True,
-        token: Optional[str] = None,
         **kwargs,
     ) -> str:
         """
         Overwrite the `push_to_hub` method in order to force-add the tag "sft" when pushing the
         model on the Hub. Please refer to `~transformers.Trainer.push_to_hub` for more details.
+        Unlike the parent class, we don't use the `token` argument to mitigate security risks.
         """
         kwargs = trl_sanitze_kwargs_for_tagging(model=self.model, tag_names=self._tag_names, kwargs=kwargs)
-        return super().push_to_hub(commit_message=commit_message, blocking=blocking, token=token, **kwargs)
+        return super().push_to_hub(commit_message=commit_message, blocking=blocking, **kwargs)
 
     def _prepare_dataset(
         self,

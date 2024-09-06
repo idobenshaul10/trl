@@ -30,10 +30,12 @@ from transformers import (
     TrainerState,
     TrainingArguments,
 )
+from transformers.integrations import WandbCallback
 from transformers.trainer_utils import has_length
 
 from ..models.utils import unwrap_model_for_generation
-from .judges import BaseRankJudge
+from .judges import BasePairwiseJudge
+from .utils import decode_and_strip_padding, truncate_right
 
 
 if is_deepspeed_available():
@@ -58,7 +60,9 @@ class SyncRefModelCallback(TrainerCallback):
     def sync_target_model(model, target_model, alpha):
         deepspeed_plugin = AcceleratorState().deepspeed_plugin
         if deepspeed_plugin is not None and deepspeed_plugin.zero_stage == 3:
-            with deepspeed.zero.GatheredParameters(list(model.parameters()), modifier_rank=0):
+            with deepspeed.zero.GatheredParameters(
+                list(model.parameters()) + list(target_model.parameters()), modifier_rank=0
+            ):
                 if deepspeed.comm.get_rank() == 0:
                     SyncRefModelCallback._sync_target_model(model, target_model, alpha)
         else:
@@ -154,6 +158,12 @@ class WinRateCallback(TrainerCallback):
     """
     A [`~transformers.TrainerCallback`] that computes the win rate of a model based on a reference.
 
+    It generates completions using prompts from the evaluation dataset and compares the trained model's outputs against
+    a reference. The reference is either the initial version of the model (before training) or the reference model, if
+    available in the trainer. During each evaluation step, a judge determines how often the trained model's completions
+    win against the reference using a judge. The win rate is then logged in the trainer's logs under the key
+    `"eval_win_rate"`.
+
     Usage:
     ```python
     trainer = DPOTrainer(...)
@@ -162,12 +172,13 @@ class WinRateCallback(TrainerCallback):
     ```
 
     Args:
-        prompts (`List[str]`):
-            The prompts to generate completions for.
-        judge (`BaseRankJudge`):
+        judge (`BasePairwiseJudge`):
             The judge to use for comparing completions.
         trainer (`Trainer`):
-            The trainer.
+            Trainer to which the callback will be attached. The trainer's evaluation dataset must include a `"prompt"`
+            column containing the prompts for generating completions. If the `Trainer` has a reference model (via the
+            `ref_model` attribute), it will use this reference model for generating the reference completions;
+            otherwise, it defaults to using the initial model.
         generation_config (`GenerationConfig`, *optional*):
             The generation config to use for generating completions.
         batch_size (`int`, *optional*):
@@ -176,20 +187,16 @@ class WinRateCallback(TrainerCallback):
 
     def __init__(
         self,
-        prompts: List[str],
-        judge: BaseRankJudge,
+        judge: BasePairwiseJudge,
         trainer: Trainer,
         generation_config: Optional[GenerationConfig] = None,
         batch_size: int = 4,
     ):
-        self.prompts = prompts
         self.generation_config = generation_config
         self.judge = judge
         self.ref_completions = []
         self.trainer = trainer
         self.eval_dataset = self.trainer.eval_dataset
-        if not hasattr(trainer, "ref_model"):
-            raise AttributeError("Trainer must have a `ref_model` attribute.")
         self.batch_size = batch_size
 
     def generate_completions_for_model(self, model, tokenizer, prompts):
@@ -213,13 +220,18 @@ class WinRateCallback(TrainerCallback):
         return completions
 
     def on_train_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        # When the trainer is initialized, we generate completions for the reference model.
         tokenizer = kwargs["tokenizer"]
         tokenizer.padding_side = "left"
         accelerator = self.trainer.accelerator
+        model = getattr(self.trainer, "ref_model", kwargs["model"])  # get the ref model if any, else use the model
         with accelerator.split_between_processes(self.eval_dataset["prompt"], apply_padding=True) as prompts:
-            self.ref_completions = self.generate_completions_for_model(self.trainer.ref_model, tokenizer, prompts)
+            self.ref_completions = self.generate_completions_for_model(model, tokenizer, prompts)
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        # At every evaluation step, we generate completions for the model and compare them with the reference
+        # completions that have been generated at the beginning of training. We then compute the win rate and log it to
+        # the trainer.
         model = kwargs["model"]
         tokenizer = kwargs["tokenizer"]
         accelerator = self.trainer.accelerator
@@ -233,3 +245,78 @@ class WinRateCallback(TrainerCallback):
         if self.trainer.accelerator.is_main_process:
             win_rate = sum(winner_idx == 1 for winner_idx in winner_indices) / len(winner_indices)
             self.trainer.log({"eval_win_rate": win_rate})
+
+
+class LogCompletionsCallback(WandbCallback):
+    r"""
+    A [`~transformers.TrainerCallback`] that logs completions to Weights & Biases.
+
+    Usage:
+    ```python
+    prompts = ["The capital of France is", "The opposite of up is"]
+    trainer = DPOTrainer(..., callbacks=[LogCompletionsCallback(prompts)])
+    ```
+
+    Args:
+        prompts (`List[str]`):
+            The prompts to generate completions for.
+        freq (`Optional[int]`, *optional*, defaults to `None`):
+            The frequency at which to log completions. If not provided, defaults to `logging_steps`.
+    """
+
+    def __init__(self, prompts: List[str], freq: int = None):
+        super().__init__()
+        self.prompts = prompts
+        self.inputs = None  # will be tokenized in on_train_begin
+        self.table = []
+        self._last_logged_step = -1
+        self.freq = freq
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        tokenizer = kwargs["tokenizer"]
+        self.inputs = tokenizer(self.prompts, return_tensors="pt", padding=True, truncation=True)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        # Only log from the main process
+        if not state.is_world_process_zero:
+            return
+
+        # Only log once per step (this method may be called multiple times)
+        if state.global_step == self._last_logged_step:
+            return
+
+        # Only log every `freq` steps (if no `freq` is provided, log every `logging_steps` steps)
+        freq = self.freq or state.logging_steps
+        if state.global_step % freq != 0:
+            return
+
+        # Get the model and tokenizer
+        model = kwargs["model"]
+        tokenizer = kwargs["tokenizer"]
+        model.eval()
+
+        # Generate completions
+        generation_config = GenerationConfig(max_new_tokens=args.max_new_tokens, min_new_tokens=args.max_new_tokens)
+        inputs = self.inputs.to(args.device)
+        _, context_length = inputs["input_ids"].shape
+        output = model.generate(**inputs, generation_config=generation_config)
+
+        # Get only the completions
+        completion_ids = output[:, context_length:]
+
+        # After the first EOS token, replace all tokens with padding tokens
+        completion_ids, _ = truncate_right(completion_ids, tokenizer.eos_token_id, tokenizer.pad_token_id)
+
+        # Decode the prompts and completions
+        prompts = decode_and_strip_padding(inputs["input_ids"], tokenizer)
+        completions = decode_and_strip_padding(completion_ids, tokenizer)
+
+        # Build the data to log
+        global_step = [str(state.global_step)] * len(prompts)
+        data = list(zip(global_step, prompts, completions))
+        self.table.extend(data)
+        table = self._wandb.Table(columns=["step", "prompt", "completion"], data=self.table)
+        self._wandb.log({"completions": table})
+
+        # Save the last logged step, so we don't log the same completions multiple times
+        self._last_logged_step = state.global_step

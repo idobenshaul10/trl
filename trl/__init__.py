@@ -1,6 +1,6 @@
 # flake8: noqa
 
-__version__ = "0.9.6.dev0"
+__version__ = "0.11.0.dev0"
 
 from typing import TYPE_CHECKING
 from .import_utils import _LazyModule, is_diffusers_available, OptionalDependencyNotAvailable
@@ -26,6 +26,7 @@ _import_structure = {
         "is_xpu_available",
         "is_llmblender_available",
         "is_openai_available",
+        "is_liger_available",
     ],
     "models": [
         "AutoModelForCausalLMWithValueHead",
@@ -67,6 +68,7 @@ _import_structure = {
         "BasePairwiseJudge",
         "RandomRankJudge",
         "RandomPairwiseJudge",
+        "PairRMJudge",
         "HfPairwiseJudge",
         "OpenAIPairwiseJudge",
     ],
@@ -79,6 +81,7 @@ _import_structure = {
         "MultitaskPromptTuningConfig",
         "MultitaskPromptTuningInit",
     ],
+    "data_utils": ["maybe_reformat_dpo_to_kto"],
 }
 
 try:
@@ -111,6 +114,7 @@ if TYPE_CHECKING:
         is_xpu_available,
         is_llmblender_available,
         is_openai_available,
+        is_liger_available,
     )
     from .models import (
         AutoModelForCausalLMWithValueHead,
@@ -152,12 +156,14 @@ if TYPE_CHECKING:
         BasePairwiseJudge,
         RandomRankJudge,
         RandomPairwiseJudge,
+        PairRMJudge,
         HfPairwiseJudge,
         OpenAIPairwiseJudge,
     )
     from .trainer.callbacks import RichProgressCallback, SyncRefModelCallback
     from .trainer.utils import get_kbit_device_map, get_peft_config, get_quantization_config
     from .commands.cli_utils import init_zero_verbose, SFTScriptArguments, DPOScriptArguments, TrlParser
+    from .data_utils import maybe_reformat_dpo_to_kto
 
     try:
         if not is_diffusers_available():

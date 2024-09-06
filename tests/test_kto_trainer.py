@@ -75,15 +75,17 @@ class KTOTrainerTester(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ["gpt2", True, True],
-            ["gpt2", True, False],
-            # ["t5", True],
-            ["gpt2", False, True],
-            ["gpt2", False, False],
-            # ["t5", False],
+            ["gpt2", "kto", True, True],
+            ["gpt2", "kto", True, False],
+            ["gpt2", "kto", False, True],
+            ["gpt2", "kto", False, False],
+            ["gpt2", "apo_zero_unpaired", True, True],
+            ["gpt2", "apo_zero_unpaired", True, False],
+            ["gpt2", "apo_zero_unpaired", False, True],
+            ["gpt2", "apo_zero_unpaired", False, False],
         ]
     )
-    def test_kto_trainer(self, name, pre_compute, eval_dataset):
+    def test_kto_trainer(self, name, loss_type, pre_compute, eval_dataset):
         with tempfile.TemporaryDirectory() as tmp_dir:
             training_args = KTOConfig(
                 output_dir=tmp_dir,
@@ -95,6 +97,7 @@ class KTOTrainerTester(unittest.TestCase):
                 eval_strategy="steps",
                 beta=0.1,
                 precompute_ref_log_probs=pre_compute,
+                loss_type=loss_type,
                 report_to="none",
             )
 
@@ -171,20 +174,31 @@ class KTOTrainerTester(unittest.TestCase):
                 self.assertListEqual(tokenized_dataset["answer_input_ids"][0], [5968, 1219, 72, 3621, 284, 1826, 345])
                 self.assertListEqual(tokenized_dataset["answer_attention_mask"][0], [1, 1, 1, 1, 1, 1, 1])
 
-                # Test reversal of (prompt, completion) pairs for KL dataset
-                tokenized_kl_dataset = tokenized_dataset.map(_get_kl_dataset, batched=True, batch_size=2)
-                self.assertListEqual(
-                    tokenized_kl_dataset["prompt_input_ids"][0], tokenized_dataset["prompt_input_ids"][0]
-                )
-                self.assertListEqual(
-                    tokenized_kl_dataset["prompt_attention_mask"][0], tokenized_dataset["prompt_attention_mask"][0]
-                )
-                self.assertListEqual(
-                    tokenized_kl_dataset["answer_input_ids"][0], tokenized_dataset["answer_input_ids"][1]
-                )
-                self.assertListEqual(
-                    tokenized_kl_dataset["answer_attention_mask"][0], tokenized_dataset["answer_attention_mask"][1]
-                )
+                # Test corruption of (prompt, completion) pairs for KL dataset
+                for batch_size in [2, 3]:
+                    tokenized_kl_dataset = tokenized_dataset.map(_get_kl_dataset, batched=True, batch_size=batch_size)
+
+                    # Verify that the "answer_input_ids" have been modified, meaning the new "answer_input_ids" differ
+                    # from the original ones. However, when the length of the dataset modulo batch_size equals 1,
+                    # the last batch remains unaltered. This is a rare scenario that does not impact the training
+                    # process, so we exclude it from testing by iterating only up to len - 1.
+                    for i in range(len(tokenized_kl_dataset["answer_input_ids"]) - 1):
+                        self.assertListEqual(
+                            tokenized_dataset["prompt_input_ids"][i],
+                            tokenized_kl_dataset["prompt_input_ids"][i],
+                        )
+                        self.assertListEqual(
+                            tokenized_dataset["prompt_attention_mask"][i],
+                            tokenized_kl_dataset["prompt_attention_mask"][i],
+                        )
+                        self.assertNotEqual(
+                            tokenized_dataset["answer_input_ids"][i],
+                            tokenized_kl_dataset["answer_input_ids"][i],
+                        )
+                        self.assertNotEqual(
+                            tokenized_dataset["answer_attention_mask"][i],
+                            tokenized_kl_dataset["answer_attention_mask"][i],
+                        )
 
                 fn_kwargs = {
                     "prefix": "",
