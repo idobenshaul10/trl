@@ -726,13 +726,31 @@ class DPOTrainer(Trainer):
                 desc="Tokenizing train dataset",
             )
             if eval_dataset is not None:
-                eval_dataset = eval_dataset.map(
-                    self.tokenize_row if not self.is_vision_model else self.process_row,
-                    fn_kwargs=fn_kwargs,
-                    num_proc=self.dataset_num_proc,
-                    writer_batch_size=10,
-                    desc="Tokenizing eval dataset",
-                )
+                if isinstance(eval_dataset, dict):
+                    for eval_key in eval_dataset:
+                        eval_dataset[eval_key] = eval_dataset[eval_key].map(
+                            (
+                                self.tokenize_row
+                                if not self.is_vision_model
+                                else self.process_row
+                            ),
+                            fn_kwargs=fn_kwargs,
+                            num_proc=self.dataset_num_proc,
+                            writer_batch_size=10,
+                            desc=f"Tokenizing {eval_key} dataset",
+                        )
+                else:
+                    eval_dataset = eval_dataset.map(
+                        (
+                            self.tokenize_row
+                            if not self.is_vision_model
+                            else self.process_row
+                        ),
+                        fn_kwargs=fn_kwargs,
+                        num_proc=self.dataset_num_proc,
+                        writer_batch_size=10,
+                        desc="Tokenizing eval dataset",
+                    )
 
         super().__init__(
             model=model,
